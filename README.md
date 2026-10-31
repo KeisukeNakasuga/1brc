@@ -37,11 +37,15 @@ hyperfine でウォームアップ1回 + 5回実行した平均。
 
 ```sh
 hyperfine --warmup 1 --runs 5 './calculate_average_baseline.sh > /dev/null'
+hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution1 > /dev/null'
 ```
 
 | 実装 | 平均 [s] | 最速 [s] | 最遅 [s] | user [s] | system [s] | 倍率 |
 |---|---:|---:|---:|---:|---:|---:|
 | baseline | 95.660 ± 0.865 | 94.476 | 96.811 | 93.713 | 3.087 | 1.00 |
+| Solution1 | 80.151 ± 0.688 | 79.562 | 81.317 | 77.801 | 3.253 | 1.19 |
 
 - baseline：`user` ≈ 経過時間なので、1コアだけで処理している（32スレッド中31スレッドは空いている）
 - 処理速度は約 144 MB/秒（約 1,050 万行/秒）。ディスクではなく、1行ごとの文字列解析と集計が遅い
+- Solution1：`split(";")` を `indexOf` + `substring` に置き換えた。1行ごとの `ArrayList` と `String[]` の生成がなくなり、約 15.5 秒（16%）短縮
+  - 処理速度は約 172 MB/秒（約 1,250 万行/秒）。まだ1コアのみ
