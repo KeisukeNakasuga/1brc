@@ -40,6 +40,7 @@ hyperfine --warmup 1 --runs 5 './calculate_average_baseline.sh > /dev/null'
 hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution1 > /dev/null'
 hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution2 > /dev/null'
 hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution3 > /dev/null'
+hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution4 > /dev/null'
 ```
 
 | 実装 | 平均 [s] | 最速 [s] | 最遅 [s] | user [s] | system [s] | 倍率 |
@@ -48,6 +49,7 @@ hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.j
 | Solution1 | 80.151 ± 0.688 | 79.562 | 81.317 | 77.801 | 3.253 | 1.19 |
 | Solution2 | 62.571 ± 0.299 | 62.086 | 62.823 | 60.225 | 3.017 | 1.53 |
 | Solution3 | 61.376 ± 1.298 | 59.942 | 62.999 | 59.066 | 2.913 | 1.56 |
+| Solution4 | 54.666 ± 2.372 | 52.881 | 58.693 | 52.281 | 2.879 | 1.75 |
 
 - baseline：`user` ≈ 経過時間なので、1コアだけで処理している（32スレッド中31スレッドは空いている）
 - 処理速度は約 144 MB/秒（約 1,050 万行/秒）。ディスクではなく、1行ごとの文字列解析と集計が遅い
@@ -57,3 +59,6 @@ hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.j
   - 処理速度は約 220 MB/秒（約 1,600 万行/秒）。まだ1コアのみ
 - Solution3：`Measurement` record と `Collector` / `groupingBy` をやめ、自前の `HashMap<String, MeasurementAggregator>` の箱を直接更新するようにした。Solution2 との差は約 1.2 秒で、ばらつき（σ 1.3 秒）と同程度のため誤差の範囲
   - JIT のエスケープ解析で `Measurement` の生成が既に消えていた可能性がある
+- Solution4：`HashMap` を自作のハッシュテーブル `StationTable`（オープンアドレス法、サイズ 2^16）に置き換えた。`;` を探すループで同時にハッシュを計算し、既存の地点は元の行と直接比較するため、地点名の `substring` は新しい地点のときだけ（約400回）になった。JITでも消せないオブジェクト生成がなくなった。Solution3 から約 6.7 秒（11%）短縮
+  - 処理速度は約 252 MB/秒（約 1,830 万行/秒）。まだ1コアのみ
+  - σ が大きめ（最遅の 58.7 秒が突出）。計測中に他の処理が動いていた可能性がある
