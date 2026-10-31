@@ -30,3 +30,18 @@ time ./calculate_average_baseline.sh > /dev/null
 - ファイルはページキャッシュに収まるため、ディスク I/O の影響はほぼない
 - 1回が数秒になってきたら、[hyperfine](https://github.com/sharkdp/hyperfine) で複数回の平均を取る
   - 参考：公式の評価（`evaluate.sh`）は8コアに制限し、10回実行して最速と最遅を除いた平均を取っている
+
+## 計測結果
+
+hyperfine でウォームアップ1回 + 5回実行した平均。
+
+```sh
+hyperfine --warmup 1 --runs 5 './calculate_average_baseline.sh > /dev/null'
+```
+
+| 実装 | 平均 [s] | 最速 [s] | 最遅 [s] | user [s] | system [s] | 倍率 |
+|---|---:|---:|---:|---:|---:|---:|
+| baseline | 95.660 ± 0.865 | 94.476 | 96.811 | 93.713 | 3.087 | 1.00 |
+
+- baseline：`user` ≈ 経過時間なので、1コアだけで処理している（32スレッド中31スレッドは空いている）
+- 処理速度は約 144 MB/秒（約 1,050 万行/秒）。ディスクではなく、1行ごとの文字列解析と集計が遅い
