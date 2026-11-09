@@ -42,6 +42,7 @@ hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.j
 hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution3 > /dev/null'
 hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution4 > /dev/null'
 hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution5 > /dev/null'
+hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution6 > /dev/null'
 ```
 
 | 実装 | 平均 [s] | 最速 [s] | 最遅 [s] | user [s] | system [s] | 倍率 |
@@ -52,6 +53,7 @@ hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.j
 | Solution3 | 61.376 ± 1.298 | 59.942 | 62.999 | 59.066 | 2.913 | 1.56 |
 | Solution4 | 54.666 ± 2.372 | 52.881 | 58.693 | 52.281 | 2.879 | 1.75 |
 | Solution5 | 20.007 ± 0.353 | 19.632 | 20.375 | 19.389 | 0.659 | 4.78 |
+| Solution6 | 1.358 ± 0.024 | 1.341 | 1.398 | 38.357 | 1.292 | 70.44 |
 
 - baseline：`user` ≈ 経過時間なので、1コアだけで処理している（32スレッド中31スレッドは空いている）
 - 処理速度は約 144 MB/秒（約 1,050 万行/秒）。ディスクではなく、1行ごとの文字列解析と集計が遅い
@@ -67,3 +69,6 @@ hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.j
 - Solution5：`Files.lines` をやめ、`FileInputStream` で 1MB ずつ `byte[]` に読み込み、`;` と `\n` を自分で探すようにした。UTF-8 のデコードと1行ごとの `String` 生成がなくなり、1行あたりのオブジェクト生成がゼロになった。バッファの境目で切れた行は先頭に移して次の読み込みとつなげる。地点名は `byte[]` のままハッシュ・比較し、`String` にするのは出力時だけ。Solution4 から約 34.7 秒（63%）短縮
   - 処理速度は約 690 MB/秒（約 5,000 万行/秒）。まだ1コアのみ
   - system も 2.9 秒 → 0.7 秒に減った。ヒープの使用量が激減し、メモリ確保に伴う OS とのやり取りが減ったためと考えられる
+- Solution6：ファイルをスレッド数（32）で等分し、各区切りを次の改行の直後までずらして、スレッドごとに担当範囲を処理するようにした。読み込みは `FileChannel` の位置指定 `read` を使い、解析ループは Solution5 と同じ。`StationTable` はスレッドごとに持ち、最後に `TreeMap` でまとめる。Solution5 から約 18.6 秒（93%）短縮し、14.7 倍になった
+  - 処理速度は約 10.2 GB/秒（約 7.4 億行/秒）。ディスクの速度を超えているので、ページキャッシュから読んでいる
+  - user が 19.4 秒 → 38.4 秒と約 2 倍になった。16 コア / 32 スレッドで 14.7 倍なので、SMT の 2 本目のスレッドは物理コア 1 つ分には届いていない
