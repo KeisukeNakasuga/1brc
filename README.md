@@ -45,6 +45,7 @@ hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.j
 hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution6 > /dev/null'
 hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution7 > /dev/null'
 hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution8 > /dev/null'
+hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution9 > /dev/null'
 ```
 
 | 実装 | 平均 [s] | 最速 [s] | 最遅 [s] | user [s] | system [s] | 倍率 |
@@ -58,6 +59,7 @@ hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.j
 | Solution6 | 1.358 ± 0.024 | 1.341 | 1.398 | 38.357 | 1.292 | 70.44 |
 | Solution7 | 1.676 ± 0.044 | 1.645 | 1.752 | 41.757 | 0.658 | 57.08 |
 | Solution8 | 1.705 ± 0.027 | 1.664 | 1.734 | 42.641 | 0.672 | 56.11 |
+| Solution9 | 1.703 ± 0.060 | 1.647 | 1.802 | 47.467 | 1.686 | 56.17 |
 
 - baseline：`user` ≈ 経過時間なので、1コアだけで処理している（32スレッド中31スレッドは空いている）
 - 処理速度は約 144 MB/秒（約 1,050 万行/秒）。ディスクではなく、1行ごとの文字列解析と集計が遅い
@@ -84,6 +86,9 @@ hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.j
 - Solution8：Solution7 の `buf.get(pos)` をやめ、`sun.misc.Unsafe` でマップ領域のアドレスを直接読むようにした（`UNSAFE.getByte(アドレス)`）。範囲チェックとマップの有効性チェックがなくなる。アドレスは `MappedByteBuffer` 内部の `Buffer.address` フィールドから取る。`buf` が GC で回収されるとマップが解除されて JVM ごと落ちるので、`Reference.reachabilityFence(buf)` で読み終わるまで生かしておく。Solution7 との差は約 0.03 秒で、ばらつき（σ 0.03〜0.04 秒）と同程度のため誤差の範囲
   - 処理速度は約 8.1 GB/秒（約 5.9 億行/秒）
   - チェックをなくしても速くならなかったので、Solution7 で考えた「`buf.get()` のチェックが重い」という原因は外れ（下の「調査：mmap が遅い原因」を参照）
+- Solution9：Solution6 を基に、ファイルを 8MB のチャンク（約 1,650 個）に分け、手が空いたスレッドが次のチャンクを取りに行くようにした（動的スケジューリング。ワークスティーリングと呼ばれることもあるが、厳密には共有カウンタから取り出す方式）。次に処理するチャンクの番号を `AtomicInteger` で全スレッドが共有し、`getAndIncrement()` で1つずつ取り出す。`StationTable` と 1MB のバッファはスレッドごとに持ち回す。Solution6 から約 0.23 秒（16%）**遅くなった**（同じ hyperfine で続けて測った Solution6 は 1.472 ± 0.082 秒）
+  - user が 38.4 秒 → 47.5 秒と約 9 秒増えた。遊ぶ時間が減るどころか、CPU の仕事量そのものが増えている
+  - チャンクの大きさを変えて調べた（下の「調査：チャンクの大きさ（Solution9）」を参照）
 
 ## 調査：mmap が遅い原因（Solution6〜8）
 
@@ -157,3 +162,34 @@ Solution6 と Solution8 のコピー（Solution6Timing / Solution8Timing）に�
   - mmap ではページフォルトで kernel の処理が割り込むので、スレッドごとの差が出やすいのかもしれない
   - 数回実行して、速いスレッドの番号が毎回同じ（ファイルの位置やデータが理由）か、実行ごとに変わる（スケジューリングや SMT が理由）かを見ると絞り込める
 - 対策：ファイルを数 MB の小さなチャンクに分け、空いたスレッドが次のチャンクを取りに行く（ワークスティーリング）と、原因によらず偏りを吸収できる。Solution6 にも効くはず
+
+## 調査：チャンクの大きさ（Solution9）
+
+Solution9.java の `CHUNK_SIZE` の行だけを書き換えたコピーを scratchpad で `javac` してクラスパスを差し替え、同じ hyperfine の中で続けて測った（`-N` はシェルを通さずに実行するオプションで、出力は hyperfine が捨てる）。
+
+```sh
+hyperfine --warmup 1 --runs 5 -N \
+  -n Solution6 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution6' \
+  -n chunk8MB 'java --class-path <8MB版のクラス> dev.morling.onebrc.Solution9' \
+  -n chunk64MB 'java --class-path <64MB版のクラス> dev.morling.onebrc.Solution9' \
+  -n chunk1GB 'java --class-path <1GB版のクラス> dev.morling.onebrc.Solution9'
+```
+
+| 実装 | チャンク数 | 平均 [s] | 最速 [s] | 最遅 [s] | user [s] | system [s] |
+|---|---:|---:|---:|---:|---:|---:|
+| Solution6（32等分） | 32 | 1.440 ± 0.019 | 1.423 | 1.468 | 38.334 | 1.596 |
+| chunk 8MB | 約 1,650 | 1.618 ± 0.032 | 1.573 | 1.655 | 46.657 | 1.636 |
+| chunk 64MB | 約 206 | 1.430 ± 0.024 | 1.416 | 1.473 | 38.734 | 1.609 |
+| chunk 1GB | 32（スレッド数が下限） | 1.482 ± 0.077 | 1.415 | 1.606 | 38.850 | 1.611 |
+
+- 1GB はチャンク数がスレッド数で下限になり、Solution6 と同じ 32 等分になる。速さも Solution6 とほぼ同じなので、「`process()` を何度も呼ぶ」コードの構造は遅さの原因ではない
+- 遅いのは 8MB だけで、user が約 8 秒増える。小さいチャンク特有のコストがある。原因は未検証
+  - 候補：`process()` の呼び出しが短く多くなり、JIT の最適化の状態（OSR のコードか通常のコンパイルか）が変わる
+  - 候補：各スレッドが飛び飛びの位置を読むので、キャッシュや先読みが効きにくくなる
+- 64MB は Solution6 と同じ速さで、偏りがなくなったはずなのに速くならなかった
+- 仮説（未検証）：SMT のおかげで、Solution6 の偏りは実害が小さかった
+  - 物理コアは 16 個。早く終わったスレッドがあると、同じコアの相方がコアを独占して速く走れるので、論理 CPU が空いていても物理コアとしてはほとんど遊んでいない
+  - 「32 × 経過時間 − CPU 時間」で見積もった遊んでいた時間は、論理 CPU 32 個で 32 倍になる前提なので、偏りの損失を大きく見積もりすぎていた
+  - Solution8 は偏りが大きく、最後の 1 本が遅れたので、相方の独占でも埋めきれなかったと考えられる
+  - 確かめるには、スレッド数 16（物理コアと同じ数）で Solution6 と chunk 64MB を比べる。相方による補い合いがなくなるので、偏りの影響がそのまま出て、64MB が勝つはず
+- Solution6 の計測値は今回 1.44〜1.47 秒で、表の 1.358 秒より遅め。計測ごとの環境のばらつきがあるので、比べるときは同じ hyperfine で続けて測る
