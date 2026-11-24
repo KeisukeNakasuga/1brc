@@ -193,3 +193,65 @@ hyperfine --warmup 1 --runs 5 -N \
   - Solution8 は偏りが大きく、最後の 1 本が遅れたので、相方の独占でも埋めきれなかったと考えられる
   - 確かめるには、スレッド数 16（物理コアと同じ数）で Solution6 と chunk 64MB を比べる。相方による補い合いがなくなるので、偏りの影響がそのまま出て、64MB が勝つはず
 - Solution6 の計測値は今回 1.44〜1.47 秒で、表の 1.358 秒より遅め。計測ごとの環境のばらつきがあるので、比べるときは同じ hyperfine で続けて測る
+
+## 調査：Solution6 ~ 9で期待したよりも性能改善しなかった理由を考察
+- mmap
+  - mmapで削れるのはカーネルがreadでデータコピーする時間でこれは期待通り機能していた
+    - コピー自体は省略されていた → sys時間
+    - ページテーブルの作成も十分に高速だった → sys時間
+  - mmapでコピーゼロを実現した結果、短くなる時間はCPU時間の理論値
+    - user 38.36s, sys 1.29s, 処理量13.8G
+      - 解析ループ(user) → 1バイトあたり 約2.8ns 1行あたり 約38ns
+      - コピー(sys) → 1バイトあたり 約0.09ns 1行あたり 約1.3ns
+        - コピーが占める割合がかなり少ない mmapが効いても後者に対してなので効きづらい
+          - とはいえ性能が劣化したことを説明できないので、追加で実験が必要
+      - user領域における処理の実行時間が大きいのでここを改善するほうが先か
+
+## 調査：Solution6を8/16/32スレッドで計測した結果
+コマンド
+```bash
+# スレッド数 8 / 16 / 24 / 32 で計測
+hyperfine --warmup 1 --runs 5 -N \
+  -P threads 8 32 -D 8 \
+  -n 'Solution6 {threads}T' \
+  'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution6 {threads}' \
+  --export-markdown step0_hyperfine.md
+
+# perf stat（16 スレッドと 32 スレッド、各 3 回の平均）
+perf stat -r 3 -e task-clock,cycles:u,instructions:u,branches:u,branch-misses:u \
+  java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution6 16 > /dev/null
+perf stat -r 3 -e task-clock,cycles:u,instructions:u,branches:u,branch-misses:u \
+```
+
+結果
+
+Solution6 のスレッド数ごとの計測（hyperfine）
+
+| スレッド数 | 平均 [s] | 最速 [s] | 最遅 [s] | user [s] | system [s] | 8 スレッド比 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 2.868 ± 0.038 | 2.811 | 2.908 | 21.874 | 0.508 | 1.00 |
+| 16 | 1.632 ± 0.047 | 1.560 | 1.673 | 23.632 | 0.666 | 1.76 |
+| 24 | 1.554 ± 0.011 | 1.541 | 1.570 | 31.088 | 0.837 | 1.85 |
+| 32 | 1.449 ± 0.014 | 1.428 | 1.465 | 39.572 | 1.342 | 1.98 |
+
+Solution6 の perf stat（3 回の平均）
+
+| 項目 | 16 スレッド | 32 スレッド |
+|---|---:|---:|
+| 経過時間 [s] | 1.678 ± 0.111 | 1.457 ± 0.007 |
+| task-clock [ms] | 24,270.88 | 41,676.46 |
+| cycles:u | 120,265,215,472 | 199,738,593,399 |
+| instructions:u | 367,414,304,867 | 368,976,447,714 |
+| branches:u | 77,696,816,941 | 78,351,884,227 |
+| branch-misses:u | 1,412,445,393 | 1,419,546,028 |
+
+perf stat から計算した値
+
+| 項目 | 計算方法 | 16 スレッド | 32 スレッド |
+|---|---|---:|---:|
+| 1 行あたりの命令数 | instructions ÷ 10 億行 | 約 367 | 約 369 |
+| 1 行あたりの分岐数 | branches ÷ 10 億行 | 約 78 | 約 78 |
+| 1 行あたりの分岐予測の失敗 | branch-misses ÷ 10 億行 | 約 1.41 | 約 1.42 |
+| 1 行あたりのサイクル数 | cycles ÷ 10 億行 | 約 120 | 約 200 |
+| IPC（論理スレッドあたり） | instructions ÷ cycles | 3.05 | 1.85 |
+| 平均クロック [GHz] | cycles ÷ task-clock | 約 4.96 | 約 4.79 |
