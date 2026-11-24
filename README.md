@@ -43,6 +43,7 @@ hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.j
 hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution4 > /dev/null'
 hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution5 > /dev/null'
 hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution6 > /dev/null'
+hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution7 > /dev/null'
 ```
 
 | 実装 | 平均 [s] | 最速 [s] | 最遅 [s] | user [s] | system [s] | 倍率 |
@@ -54,6 +55,7 @@ hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.j
 | Solution4 | 54.666 ± 2.372 | 52.881 | 58.693 | 52.281 | 2.879 | 1.75 |
 | Solution5 | 20.007 ± 0.353 | 19.632 | 20.375 | 19.389 | 0.659 | 4.78 |
 | Solution6 | 1.358 ± 0.024 | 1.341 | 1.398 | 38.357 | 1.292 | 70.44 |
+| Solution7 | 1.676 ± 0.044 | 1.645 | 1.752 | 41.757 | 0.658 | 57.08 |
 
 - baseline：`user` ≈ 経過時間なので、1コアだけで処理している（32スレッド中31スレッドは空いている）
 - 処理速度は約 144 MB/秒（約 1,050 万行/秒）。ディスクではなく、1行ごとの文字列解析と集計が遅い
@@ -72,3 +74,8 @@ hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.j
 - Solution6：ファイルをスレッド数（32）で等分し、各区切りを次の改行の直後までずらして、スレッドごとに担当範囲を処理するようにした。読み込みは `FileChannel` の位置指定 `read` を使い、解析ループは Solution5 と同じ。`StationTable` はスレッドごとに持ち、最後に `TreeMap` でまとめる。Solution5 から約 18.6 秒（93%）短縮し、14.7 倍になった
   - 処理速度は約 10.2 GB/秒（約 7.4 億行/秒）。ディスクの速度を超えているので、ページキャッシュから読んでいる
   - user が 19.4 秒 → 38.4 秒と約 2 倍になった。16 コア / 32 スレッドで 14.7 倍なので、SMT の 2 本目のスレッドは物理コア 1 つ分には届いていない
+- Solution7：`read` で `byte[]` にコピーするのをやめ、`FileChannel.map` で担当範囲を `MappedByteBuffer` としてマップして直接読むようにした（1回のマップは最大 1GB）。マップ範囲の最後の改行までを処理し、次のマップをその直後から始めるので、途中で切れた行のコピーも不要になった。解析ループは Solution6 と同じ。Solution6 から約 0.32 秒（23%）**遅くなった**
+  - 処理速度は約 8.2 GB/秒（約 6.0 億行/秒）
+  - system は 1.29 秒 → 0.66 秒と半分になり、カーネルから `byte[]` へのコピーがなくなった効果は出ている
+  - 一方で user が 38.4 秒 → 41.8 秒と約 3.4 秒増え、system の減り分を上回った。`buf[pos]` が `buf.get(pos)` になり、1バイトごとに範囲チェックやマップの有効性チェックが入るためと考えられる。地点名の比較も、まとめて比較する `Arrays.equals` から1バイトずつのループになった
+  - ページキャッシュに載っている状態では `read` のコピーはもともと安く、それより1バイトずつの読み込みのコストのほうが効く
