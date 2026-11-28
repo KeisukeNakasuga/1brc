@@ -46,6 +46,12 @@ hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.j
 hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution7 > /dev/null'
 hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution8 > /dev/null'
 hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution9 > /dev/null'
+
+# Solution10 以降は Solution6 と同じ hyperfine で続けて測る（表は 32 スレッドの値）
+hyperfine --warmup 1 --runs 5 -N \
+  -L sol Solution6,Solution10 -L threads 16,32 \
+  -n '{sol} {threads}T' \
+  'java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.{sol} {threads}'
 ```
 
 | 実装 | 平均 [s] | 最速 [s] | 最遅 [s] | user [s] | system [s] | 倍率 |
@@ -60,6 +66,7 @@ hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.j
 | Solution7 | 1.676 ± 0.044 | 1.645 | 1.752 | 41.757 | 0.658 | 57.08 |
 | Solution8 | 1.705 ± 0.027 | 1.664 | 1.734 | 42.641 | 0.672 | 56.11 |
 | Solution9 | 1.703 ± 0.060 | 1.647 | 1.802 | 47.467 | 1.686 | 56.17 |
+| Solution10 | 1.298 ± 0.028 | 1.255 | 1.330 | 35.534 | 1.527 | 73.70 |
 
 - baseline：`user` ≈ 経過時間なので、1コアだけで処理している（32スレッド中31スレッドは空いている）
 - 処理速度は約 144 MB/秒（約 1,050 万行/秒）。ディスクではなく、1行ごとの文字列解析と集計が遅い
@@ -89,6 +96,37 @@ hyperfine --warmup 1 --runs 5 'java --class-path target/average-1.0.0-SNAPSHOT.j
 - Solution9：Solution6 を基に、ファイルを 8MB のチャンク（約 1,650 個）に分け、手が空いたスレッドが次のチャンクを取りに行くようにした（動的スケジューリング。ワークスティーリングと呼ばれることもあるが、厳密には共有カウンタから取り出す方式）。次に処理するチャンクの番号を `AtomicInteger` で全スレッドが共有し、`getAndIncrement()` で1つずつ取り出す。`StationTable` と 1MB のバッファはスレッドごとに持ち回す。Solution6 から約 0.23 秒（16%）**遅くなった**（同じ hyperfine で続けて測った Solution6 は 1.472 ± 0.082 秒）
   - user が 38.4 秒 → 47.5 秒と約 9 秒増えた。遊ぶ時間が減るどころか、CPU の仕事量そのものが増えている
   - チャンクの大きさを変えて調べた（下の「調査：チャンクの大きさ（Solution9）」を参照）
+- Solution10：user領域の計算量改善。Solution6 を基に、気温のパースを書式（`-?\d?\d\.\d`）決め打ちにした。`\n` まで1バイトずつループして `.` かどうかを毎回調べるのをやめ、2文字目が `.` かどうかで整数部の桁数を決めて、位置を指定して読む。データで変わる分岐は「負の数か」と「1桁か2桁か」の2つだけになった。Solution6 から約 0.13 秒（9%）短縮（同じ hyperfine で続けて測った Solution6 は 1.427 ± 0.036 秒、16 スレッドでは 1.610 → 1.496 秒）
+  - 処理速度は約 10.6 GB/秒（約 7.7 億行/秒）
+  - `perf stat`（16 スレッド、3 回の平均）で、1行あたりの命令数は約 367 → 338（−8%）、分岐数は約 78 → 65（−17%）、サイクル数は約 120 → 115（−4%）に減った。IPC は 3.06 → 2.95 と少し下がったが、命令数の減りのほうが大きい
+  - 狙っていた分岐予測の失敗は、1行あたり約 1.41 → 1.42 回で減らなかった。速くなったのは命令数と分岐数が減ったため
+  - 解釈（未検証）：ランダムで予測できない決めごと（符号、桁数、地点名の長さ）は Solution6 と同じ。Solution6 のループでも、最初の分岐で桁数が分かれば残りは分岐の履歴から当てられていたと考えられる。予測の失敗を減らすには、分岐そのものをなくす必要がある
+
+### CPU カウンタ（perf stat）
+
+Solution10 以降は、何が効いたかを切り分けるために `perf stat` で命令数などを記録する。SMTの影響を除くため、物理コアと同じ16スレッドで3回実行した平均を使う。カウンタの±は 0.4% 以下で安定している。経過時間は1回ごとのばらつきが大きいので、速さの比較には上のhyperfineの値を使う。
+
+```sh
+perf stat -r 3 -e task-clock,cycles:u,instructions:u,branches:u,branch-misses:u \
+  java --class-path target/average-1.0.0-SNAPSHOT.jar dev.morling.onebrc.Solution10 16 > /dev/null
+```
+
+1行あたりの値（10 億行で割った値）
+
+| 実装 | 命令数 | 分岐数 | 分岐予測の失敗 | サイクル数 | IPC |
+|---|---:|---:|---:|---:|---:|
+| Solution6 | 約 367 | 約 78 | 約 1.41 | 約 120 | 3.06 |
+| Solution10 | 約 338 | 約 65 | 約 1.42 | 約 115 | 2.95 |
+
+計測値
+
+| 実装 | task-clock [ms] | cycles:u | instructions:u | branches:u | branch-misses:u |
+|---|---:|---:|---:|---:|---:|
+| Solution6 | 24,138.15 | 119,976,856,269 | 366,950,234,045 | 77,568,330,422 | 1,407,520,838 |
+| Solution10 | 23,178.51 | 114,697,020,522 | 338,219,094,480 | 64,636,701,009 | 1,423,308,988 |
+
+- IPC は instructions ÷ cycles
+- Solution6 の値は Solution10 と同じ日に続けて測ったもの（「調査：Solution6を8/16/32スレッドで計測した結果」の 16 スレッドの値とは別の回）
 
 ## 調査：mmap が遅い原因（Solution6〜8）
 
